@@ -579,3 +579,373 @@ async def channel_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check permissions
     try:
+        member = await context.bot.get_chat_member(channel_id, context.bot.id)
+        if member.status not in ['administrator', 'creator']:
+            await update.message.reply_text(
+                "❌ Bot is not admin in this channel!",
+                reply_markup=main_menu()
+            )
+            return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=main_menu())
+        return ConversationHandler.END
+    
+    channel_data = {
+        'id': channel_id,
+        'title': channel_title,
+        'username': username
+    }
+    
+    db.add_channel(update.effective_user.id, channel_data)
+    await update.message.reply_text(
+        f"✅ Channel added: {channel_title or username}",
+        reply_markup=main_menu()
+    )
+    return ConversationHandler.END
+
+async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user(update.effective_user.id)
+    channels = user.get('channels', [])
+    
+    if not channels:
+        await query.edit_message_text(
+            "No channels added! Add one first.",
+            reply_markup=main_menu()
+        )
+        return
+    
+    post = context.user_data.get('current_post')
+    if not post:
+        await query.edit_message_text("Session expired!")
+        return
+    
+    keyboard = []
+    for ch in channels:
+        name = ch.get('title') or ch.get('username') or str(ch['id'])
+        keyboard.append([InlineKeyboardButton(f"📢 {name}", 
+                      callback_data=f"confirm_send:{ch['id']}")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    
+    await query.edit_message_text(
+        "Select channel to post:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def confirm_send_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    channel_id = int(query.data.split(":")[1])
+    post = context.user_data.get('current_post')
+    
+    if not post:
+        await query.edit_message_text("Session expired!")
+        return
+    
+    try:
+        if post['media_type'] == 'photo':
+            await context.bot.send_photo(
+                channel_id, 
+                post['media'], 
+                caption=post['caption'],
+                reply_markup=InlineKeyboardMarkup(post['keyboard']),
+                parse_mode='Markdown'
+            )
+        else:
+            await context.bot.send_video(
+                channel_id,
+                post['media'],
+                caption=post['caption'],
+                reply_markup=InlineKeyboardMarkup(post['keyboard']),
+                parse_mode='Markdown'
+            )
+        await query.edit_message_text("✅ Posted to channel!", reply_markup=main_menu())
+    except Exception as e:
+        await query.edit_message_text(f"❌ Failed to post: {str(e)}", reply_markup=main_menu())
+
+# ==================== AUTO MODE ====================
+
+async def auto_mode_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = db.get_user(update.effective_user.id)
+    current = user.get('auto_mode', False)
+    new_mode = not current
+    
+    db.update_user(update.effective_user.id, {'auto_mode': new_mode})
+    
+    status = "ON ✅" if new_mode else "OFF ❌"
+    await query.edit_message_text(
+        f"⚙️ Auto Mode: {status}\n\n"
+        "When ON: Send media with caption in format:\n"
+        "`Anime Name | https://link.com`\n\n"
+        "Bot will auto-generate posts using ALL templates.",
+        reply_markup=main_menu(),
+        parse_mode='Markdown'
+    )
+
+async def handle_auto_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user(update.effective_user.id)
+    if not user.get('auto_mode'):
+        return  # Let other handlers process
+    
+    # Check if message has media and caption with |
+    if not update.message.caption or '|' not in update.message.caption:
+        return
+    
+    parts = update.message.caption.split('|', 1)
+    anime = parts[0].strip()
+    link = parts[1].strip()
+    
+    if not link.startswith(('http://', 'https://')):
+        await update.message.reply_text("❌ Invalid link format in caption")
+        return
+    
+    # Get media
+    if update.message.photo:
+        media = update.message.photo[-1].file_id
+        media_type = 'photo'
+    elif update.message.video:
+        media = update.message.video.file_id
+        media_type = 'video'
+    else:
+        return
+    
+    templates = user.get('templates', [])
+    if not templates:
+        await update.message.reply_text("❌ No templates found!")
+        return
+    
+    await update.message.reply_text(f"🔄 Auto-generating {len(templates)} posts...")
+    
+    for template in templates:
+        caption = template['caption'].replace('{anime}', anime).replace('{link}', link)
+        
+        keyboard = []
+        for row in template['buttons']:
+            new_row = []
+            for btn in row:
+                btn_url = btn['url'].replace('{link}', link)
+                new_row.append(InlineKeyboardButton(btn['text'], url=btn_url))
+            keyboard.append(new_row)
+        
+        use_media = media if not template.get('media') else media
+        
+        try:
+            if media_type == 'photo':
+                await update.message.reply_photo(
+                    use_media, 
+                    caption=caption, 
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_video(
+                    use_media,
+                    caption=caption,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error with template {template['name']}: {str(e)}")
+
+# ==================== EXPORT/IMPORT ====================
+
+async def export_import_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "📤 Export/Import Config",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Export Data", callback_data="export_data")],
+            [InlineKeyboardButton("📤 Import Data", callback_data="import_data")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_menu")]
+        ])
+    )
+
+async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = db.export_data(update.effective_user.id)
+    json_str = json.dumps(data, indent=2, default=str)
+    
+    # Send as file
+    import io
+    file = io.BytesIO(json_str.encode())
+    file.name = f"backup_{update.effective_user.id}.json"
+    
+    await query.message.reply_document(file, caption="✅ Here is your backup!")
+    await query.edit_message_text("Export complete!", reply_markup=main_menu())
+
+async def import_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Send the JSON backup file:",
+        reply_markup=cancel_keyboard()
+    )
+    return BULK_POST
+
+async def import_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document:
+        await update.message.reply_text("❌ Send a JSON file")
+        return BULK_POST
+    
+    try:
+        file = await update.message.document.get_file()
+        data = json.loads((await file.download_as_bytearray()).decode())
+        
+        db.import_data(update.effective_user.id, data)
+        await update.message.reply_text(
+            "✅ Data imported successfully!",
+            reply_markup=main_menu()
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+        return BULK_POST
+    
+    return ConversationHandler.END
+
+# ==================== UTILITIES ====================
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🎌 *Anime Template Poster Bot*\n\nMain Menu:",
+        reply_markup=main_menu(),
+        parse_mode='Markdown'
+    )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Cancelled!", reply_markup=main_menu())
+    else:
+        await update.message.reply_text("Cancelled!", reply_markup=main_menu())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ==================== MAIN ====================
+
+def main():
+    # Persistence for conversations
+    persistence = PicklePersistence(filepath='bot_persistence')
+    
+    application = Application.builder().token(Config.BOT_TOKEN).persistence(persistence).build()
+    
+    # Template creation conversation
+    template_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_template_start, pattern="^add_template$")],
+        states={
+            TEMPLATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_name)],
+            TEMPLATE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, template_link)],
+            TEMPLATE_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO, template_media)],
+            TEMPLATE_CAPTION: [
+                CallbackQueryHandler(template_caption_button, pattern="^default_caption$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, template_caption_text)
+            ],
+            TEMPLATE_BUTTON_TEXT: [
+                CallbackQueryHandler(add_button_start, pattern="^add_button$"),
+                CallbackQueryHandler(confirm_button, pattern="^confirm_button$"),
+                CallbackQueryHandler(save_template, pattern="^save_template$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, button_text_received)
+            ],
+            TEMPLATE_BUTTON_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, button_url_received),
+                CallbackQueryHandler(use_default_link, pattern="^use_default_link$")
+            ],
+            TEMPLATE_BUTTON_CONFIRM: [
+                CallbackQueryHandler(add_button_start, pattern="^add_button$"),
+                CallbackQueryHandler(save_template, pattern="^save_template$"),
+                CallbackQueryHandler(confirm_button, pattern="^confirm_button$")
+            ]
+        },
+        fallbacks=[CallbackQueryHandler(cancel, pattern="^cancel$")],
+        name="template_creation"
+    )
+    
+    # Post creation conversation
+    post_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(create_post_start, pattern="^create_post$")],
+        states={
+            POST_ANIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_anime_received)],
+            POST_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_link_received)],
+            POST_MEDIA_SELECT: [
+                MessageHandler(filters.PHOTO | filters.VIDEO, post_media_received),
+                CallbackQueryHandler(skip_media, pattern="^skip_media$")
+            ],
+            POST_PREVIEW: [CallbackQueryHandler(generate_preview, pattern="^select_template:")]
+        },
+        fallbacks=[CallbackQueryHandler(cancel, pattern="^cancel$")],
+        name="post_creation"
+    )
+    
+    # Channel conversation
+    channel_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_channel_start, pattern="^add_channel$")],
+        states={
+            CHANNEL_FORWARD: [
+                MessageHandler(filters.FORWARDED | filters.TEXT, channel_received)
+            ]
+        },
+        fallbacks=[CallbackQueryHandler(cancel, pattern="^cancel$")],
+        name="channel_add"
+    )
+    
+    # Import conversation
+    import_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(import_start, pattern="^import_data$")],
+        states={
+            BULK_POST: [MessageHandler(filters.Document.ALL, import_file)]
+        },
+        fallbacks=[CallbackQueryHandler(cancel, pattern="^cancel$")],
+        name="import_data"
+    )
+    
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(template_conv)
+    application.add_handler(post_conv)
+    application.add_handler(channel_conv)
+    application.add_handler(import_conv)
+    
+    # Callback handlers
+    application.add_handler(CallbackQueryHandler(list_templates, pattern="^list_templates$"))
+    application.add_handler(CallbackQueryHandler(view_template, pattern="^view_template:"))
+    application.add_handler(CallbackQueryHandler(delete_template, pattern="^delete_template:"))
+    application.add_handler(CallbackQueryHandler(duplicate_template, pattern="^dup_template:"))
+    application.add_handler(CallbackQueryHandler(list_channels, pattern="^list_channels$"))
+    application.add_handler(CallbackQueryHandler(auto_mode_toggle, pattern="^auto_mode$"))
+    application.add_handler(CallbackQueryHandler(export_import_menu, pattern="^export_import$"))
+    application.add_handler(CallbackQueryHandler(export_data, pattern="^export_data$"))
+    application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_menu$"))
+    application.add_handler(CallbackQueryHandler(send_post_here, pattern="^send_here:"))
+    application.add_handler(CallbackQueryHandler(send_to_channel, pattern="^send_channel:"))
+    application.add_handler(CallbackQueryHandler(confirm_send_channel, pattern="^confirm_send:"))
+    application.add_handler(CallbackQueryHandler(cancel, pattern="^cancel_post$"))
+    
+    # Auto mode handler (low priority)
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'.+\|.+'), 
+        handle_auto_post
+    ))
+    
+    # Webhook or Polling
+    if Config.WEBHOOK_URL:
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=Config.PORT,
+            webhook_url=Config.WEBHOOK_URL
+        )
+    else:
+        application.run_polling()
+
+if __name__ == "__main__":
+    main()
