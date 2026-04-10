@@ -833,7 +833,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ==================== MAIN ====================
-
 def main():
     # Persistence for conversations
     persistence = PicklePersistence(filepath='bot_persistence')
@@ -937,15 +936,13 @@ def main():
         handle_auto_post
     ))
     
-    # Webhook or Polling
-    if Config.WEBHOOK_URL:
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=Config.PORT,
-            webhook_url=Config.WEBHOOK_URL
-        )
-    else:
-        application.run_polling()
+    # ========== POLLING MODE ONLY ==========
+    # Webhook code removed - only polling
+    application.run_polling(
+        drop_pending_updates=True,  # Skip old updates
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()
+    
