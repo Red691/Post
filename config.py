@@ -8,14 +8,9 @@ class Config:
     
     # MongoDB Configuration
     MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-    DB_NAME = os.getenv("DB_NAME", "anime_poster_bot")  # Default DB name if not set
+    DB_NAME = os.getenv("DB_NAME", "anime_poster_bot")
     
-    # Validate MongoDB URI
-    if not MONGO_URI:
-        raise ValueError("MONGO_URI is not set in environment variables!")
-    
-    # Heroku/Webhook settings
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    # Port (Heroku provides this, but we don't use it for webhook)
     PORT = int(os.getenv("PORT", 8443))
     
     # Admin IDs (comma-separated)
