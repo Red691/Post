@@ -1,0 +1,4 @@
+python-telegram-bot[webhooks,job-queue]>=20.7
+pymongo>=4.6.0
+python-dotenv>=1.0.0
+aiofiles>=23.0.0
