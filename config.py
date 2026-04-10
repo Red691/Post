@@ -7,7 +7,7 @@ class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     
     # MongoDB Configuration
-    MONGO_URI = os.getenv("MONGO_URI")
+    MONGO_URI = os.getenv("MONGO_URI", "")
     DB_NAME = os.getenv("DB_NAME", "postbot")
     
     # Port (Heroku provides this, but we don't use it for webhook)
